@@ -1,0 +1,12 @@
+scep:
+  client:
+    url: ${SCEP_URL:http://scep-server:8080/scep}
+    ca: /ca/ca.pem
+    subject: CN=scep-client
+    key: client-output/client.key
+    out: client-output/client.pem
+    challenge: ${SCEP_CHALLENGE:12345678}
+    renew-from: client-output/client.pem
+    signing-key: client-output/client.key
+    renew-key: client-output/new.key
+    renew-out: client-output/renewed.pem

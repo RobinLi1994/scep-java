@@ -1,0 +1,12 @@
+scep:
+  client:
+    url: http://127.0.0.1:19090/configured-scep
+    ca: "yaml files/ca.pem"
+    subject: "CN=YAML Device,O=Example"
+    key: "yaml files/device.key"
+    out: "yaml files/device.pem"
+    challenge: yaml-test-secret
+    renew-from: "yaml files/old.pem"
+    signing-key: "yaml files/old.key"
+    renew-key: "yaml files/new.key"
+    renew-out: "yaml files/renewed.pem"

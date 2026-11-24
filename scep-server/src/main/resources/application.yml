@@ -1,0 +1,44 @@
+server:
+  address: ${SCEP_BIND:127.0.0.1}
+  port: ${SCEP_PORT:8080}
+  max-http-request-header-size: 64KB
+  tomcat:
+    connection-timeout: 20s
+    threads:
+      max: 32
+    max-connections: 256
+    accept-count: 64
+
+spring:
+  application:
+    name: scep-server
+  shell:
+    interactive:
+      enabled: false
+    command:
+      script:
+        enabled: false
+      clear:
+        enabled: false
+  main:
+    banner-mode: "off"
+
+logging:
+  level:
+    root: INFO
+    com.example.scep: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+
+scep:
+  # 默认读取 resources/ca 中的教学 CA；已有 CA 可替换这两个文件。
+  # classpath 以流读取，在 IDEA 和可执行 JAR 中都有效。
+  ca-certificate: ${SCEP_CA_CERTIFICATE:classpath:ca/ca.pem}
+  ca-private-key: ${SCEP_CA_PRIVATE_KEY:classpath:ca/ca.key}
+  # 运行期签发记录写到外部目录，不向 JAR 内部写入。
+  depot: ${SCEP_DEPOT:./depot}
+  challenge: ${SCEP_CHALLENGE:12345678}
+  validity-days: ${SCEP_VALIDITY_DAYS:1}
+  renewal-days: ${SCEP_RENEWAL_DAYS:14}
+  allow-san: ${SCEP_ALLOW_SAN:false}
+  max-request-bytes: 1048576

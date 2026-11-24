@@ -1,0 +1,8 @@
+# 构建上下文只提供双端可执行 JAR，不上传测试私钥和其他本地材料。
+**
+!scep-server/
+!scep-server/target/
+!scep-server/target/scep-server-1.0.0-exec.jar
+!scep-client/
+!scep-client/target/
+!scep-client/target/scep-client-1.0.0-exec.jar

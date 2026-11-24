@@ -1,0 +1,19 @@
+# sscep 是用于测试 Java SCEP 服务端的第三方客户端，不提供 SCEP HTTP 服务。
+services:
+  sscep-client:
+    build:
+      context: .
+    image: scep-sscep-client:0.10.0
+    platform: linux/arm64
+    container_name: sscep-docker-test
+    working_dir: /work
+    command: [ "sleep", "infinity" ]
+    stdin_open: true
+    tty: true
+    environment:
+      SCEP_URL: ${SCEP_URL:-http://host.docker.internal:8080/scep}
+      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-12345678}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./sscep-test:/work

@@ -1,0 +1,57 @@
+name: scep-server
+
+services:
+  scep-server:
+    build:
+      context: ../..
+      dockerfile: docker/scep/Dockerfile
+      target: server
+    image: scep-server:1.0.0
+    platform: linux/arm64
+    restart: unless-stopped
+    environment:
+      SCEP_BIND: 0.0.0.0
+      SCEP_PORT: 8080
+      SCEP_DEPOT: /app/depot
+      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-12345678}
+      SCEP_VALIDITY_DAYS: ${SCEP_VALIDITY_DAYS:-1}
+      SCEP_RENEWAL_DAYS: ${SCEP_RENEWAL_DAYS:-14}
+      SCEP_ALLOW_SAN: ${SCEP_ALLOW_SAN:-false}
+    ports:
+      - "127.0.0.1:${SCEP_PORT:-8080}:8080"
+    volumes:
+      - scep-depot:/app/depot
+
+  scep-client:
+    profiles: ["client"]
+    build:
+      context: ../..
+      dockerfile: docker/scep/Dockerfile
+      target: client
+    image: scep-client:1.0.0
+    platform: linux/arm64
+    stdin_open: true
+    tty: true
+    environment:
+      SPRING_CONFIG_ADDITIONAL_LOCATION: file:/config/client.yml
+      SCEP_URL: ${SCEP_URL:-http://scep-server:8080/scep}
+      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-12345678}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ./client.yml
+        target: /config/client.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../../scep-server/src/main/resources/ca/ca.pem
+        target: /ca/ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - ../../client-output:/work/client-output
+
+volumes:
+  scep-depot:

@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: scep-client
+  main:
+    banner-mode: "off"
+    log-startup-info: false
+  shell:
+    interactive:
+      enabled: false
+    command:
+      script:
+        enabled: false
+      clear:
+        enabled: false
+logging:
+  level:
+    root: INFO
+    com.example.scep: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+
+scep:
+  client:
+    # Spring Boot 将本节绑定到 ScepClientProperties；命令行显式参数优先于这些默认值。
+    url: http://127.0.0.1:8080/scep
+    # 客户端需要预配可信 CA；相对路径以启动进程的工作目录为基准。
+    # 此默认值适合从项目根目录运行，独立部署时改为自己的 CA 文件路径。
+    ca: scep-server/src/main/resources/ca/ca.pem
+    subject: CN=scep-client
+    key: client-output/client.key
+    out: client-output/client.pem
+    # 初次注册必填，可直接在外部 YAML 中填写，也可使用原有环境变量；续期不需要。
+    challenge: ${SCEP_CHALLENGE:12345678}
+    # 续期使用旧身份签名，新私钥和新证书各自保存，避免覆盖当前身份。
+    renew-from: client-output/client.pem
+    signing-key: client-output/client.key
+    renew-key: client-output/new.key
+    renew-out: client-output/renewed.pem
