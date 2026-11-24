@@ -38,6 +38,7 @@ import org.bouncycastle.cms.CMSEnvelopedDataGenerator;
 import org.bouncycastle.cms.CMSProcessableByteArray;
 import org.bouncycastle.cms.CMSSignedData;
 import org.bouncycastle.cms.CMSSignedDataGenerator;
+import org.bouncycastle.cms.CMSSignerDigestMismatchException;
 import org.bouncycastle.cms.DefaultSignedAttributeTableGenerator;
 import org.bouncycastle.cms.RecipientInformation;
 import org.bouncycastle.cms.SignerInformation;
@@ -127,11 +128,7 @@ public final class ScepCodec {
             log.debug("开始解析 SCEP 请求，报文大小={} 字节", encoded.length);
             // 外层签名把属性与加密正文绑定起来；先验签，才能把下面读到的属性视为未被篡改。
             Verified verified = verify(encoded, null);
-            String id = string(verified.attributes, ScepConstants.TRANSACTION_ID);
-            // 非空和长度上限是本实现的输入约束，事务标识本身不决定申请者能否获得证书。
-            if (id.isBlank() || id.length() > ScepConstants.MAX_TRANSACTION_ID_LENGTH) {
-                throw new IllegalArgumentException("事务标识 transactionID 为空或过长");
-            }
+            String id = transactionId(verified.attributes);
             MessageTypeEnum type = MessageTypeEnum.fromCode(string(verified.attributes, ScepConstants.MESSAGE_TYPE));
             byte[] nonce = nonce(verified.attributes, ScepConstants.SENDER_NONCE);
             // 注册/续期必须携带加密 CSR；允许无正文的是 FAILURE 等响应，不是这里处理的申请。
@@ -143,12 +140,43 @@ public final class ScepCodec {
                     verified.content.length);
             return new Message(id, type, nonce, verified.certificate, verified.content);
         } catch (ScepProtocolException e) {
-            // 保留算法和 CMS 完整性分类；上层只有在拥有可信请求上下文时才能签署失败响应。
+            // 保留算法和 CMS 完整性分类，供服务端在能关联请求时签署拒绝响应。
             throw e;
         } catch (Exception e) {
-            // 外层解析/验签失败时没有可信的请求上下文，由 HTTP 层返回请求错误。
-            // 保留 cause，交给最终处理边界记录堆栈，避免解析层与 HTTP 层重复打印。
+            // 保留 cause，交给最终处理边界记录堆栈，避免重复打印。
             throw new IllegalArgumentException("SCEP 请求签名或报文格式无效", e);
+        }
+    }
+
+    /**
+     * 从外层 CMS 提取生成失败响应所需的最小上下文，不执行签名验证。
+     *
+     * <p>该入口只允许把结构有效的 transactionID、messageType 和 senderNonce 用于关联拒绝响应，
+     * 不得把返回对象当作已验签请求参与解密、授权或签发。</p>
+     *
+     * @param encoded HTTP 层解码得到的完整 CMS 字节
+     * @return 可用于生成 CertRep FAILURE 的响应上下文
+     * @throws IllegalArgumentException CMS 或响应属性无法解析时抛出
+     */
+    public static ResponseContext decodeResponseContext(byte[] encoded) {
+        try {
+            CMSSignedData data = new CMSSignedData(encoded);
+            if (!CMSObjectIdentifiers.data.getId().equals(data.getSignedContentTypeOID())) {
+                throw new IllegalArgumentException("CMS 签名内容类型必须为 id-data");
+            }
+            Collection<SignerInformation> signers = data.getSignerInfos().getSigners();
+            if (signers.size() != 1) {
+                throw new IllegalArgumentException("CMS 必须且只能有一个签名者");
+            }
+            AttributeTable attributes = signers.iterator().next().getSignedAttributes();
+            String transactionId = transactionId(attributes);
+            // messageType 即使尚未验签也必须存在且使用协议规定的 PrintableString 类型。
+            string(attributes, ScepConstants.MESSAGE_TYPE);
+            return new ResponseContext(transactionId, nonce(attributes, ScepConstants.SENDER_NONCE));
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalArgumentException("SCEP 响应上下文无法解析", e);
         }
     }
 
@@ -208,7 +236,8 @@ public final class ScepCodec {
         bag.addCertificate(new JcaX509CertificateHolder(issued));
         // CMSAbsentContent 表示没有业务正文，证书本体放在 SignedData 的 certificates 集合中。
         byte[] certificates = bag.generate(new CMSAbsentContent()).toASN1Structure().getEncoded(ASN1Encoding.DER);
-        ASN1EncodableVector attributes = responseAttributes(request, PkiStatusEnum.SUCCESS);
+        ASN1EncodableVector attributes = responseAttributes(request.transactionId, request.nonce,
+                PkiStatusEnum.SUCCESS);
         // 使用 AES-128-CBC 加密给原请求签名者；换钥续期时接收者仍是旧证书，须用旧私钥解密。
         // 最外层由 CA 签名，让客户端校验这个结果确实来自预先信任的 CA。
         byte[] response = sign(encrypt(certificates, request.signer, CMSAlgorithm.AES128_CBC), key, ca, attributes);
@@ -228,11 +257,27 @@ public final class ScepCodec {
      */
     public static byte[] failure(Message request, FailInfoEnum failInfo, X509Certificate ca, PrivateKey key)
             throws Exception {
+        return failure(new ResponseContext(request.transactionId, request.nonce), failInfo, ca, key);
+    }
+
+    /**
+     * 只用事务关联字段生成 CertRep FAILURE，允许字段来自尚未通过 CMS 验签的请求。
+     *
+     * @param request 只包含事务标识和请求 nonce 的响应上下文
+     * @param failInfo SCEP 协议失败原因
+     * @param ca       响应签名证书
+     * @param key      CA 私钥
+     * @return CertRep FAILURE 的 DER 编码
+     * @throws Exception 响应签名或编码失败时抛出
+     */
+    public static byte[] failure(ResponseContext request, FailInfoEnum failInfo, X509Certificate ca, PrivateKey key)
+            throws Exception {
         if (failInfo == null || failInfo == FailInfoEnum.UNKNOWN) {
             throw new IllegalArgumentException("发送失败响应必须使用已知的失败原因");
         }
         // pkiStatus=2 只说明失败，具体原因由 failInfo 表达；两者是不同 OID 对应的属性。
-        ASN1EncodableVector attributes = responseAttributes(request, PkiStatusEnum.FAILURE);
+        ASN1EncodableVector attributes = responseAttributes(request.transactionId, request.nonce,
+                PkiStatusEnum.FAILURE);
         add(attributes, ScepConstants.FAIL_INFO, new DERPrintableString(failInfo.getCode()));
         // false 让 CMS 省略 eContent；仍生成签名和事务属性，因此失败响应也能校验来源及归属。
         log.info("生成 SCEP 失败响应，transactionId={}，failInfo={}", request.transactionId(), failInfo.getCode());
@@ -372,8 +417,13 @@ public final class ScepCodec {
             throw new ScepProtocolException(FailInfoEnum.BAD_ALG, "签名证书使用了不支持的公钥算法或参数");
         }
         // BC 检查签名，并在有 signedAttrs 时核对 messageDigest 与正文摘要；通过不代表签名者已获授权。
-        if (!signer.verify(new JcaSimpleSignerInfoVerifierBuilder().setProvider(Crypto.PROVIDER).build(cert))) {
-            throw new ScepProtocolException(FailInfoEnum.BAD_MESSAGE_CHECK, "CMS 签名验证失败");
+        try {
+            if (!signer.verify(new JcaSimpleSignerInfoVerifierBuilder().setProvider(Crypto.PROVIDER).build(cert))) {
+                throw new ScepProtocolException(FailInfoEnum.BAD_MESSAGE_CHECK, "CMS 签名验证失败");
+            }
+        } catch (CMSSignerDigestMismatchException e) {
+            // BC 对正文摘要不匹配抛异常，对签名值不匹配返回 false；两者都是 CMS 完整性错误。
+            throw new ScepProtocolException(FailInfoEnum.BAD_MESSAGE_CHECK, "CMS 正文摘要验证失败", e);
         }
         // SCEP 将 messageType、transactionID、nonce 等协议字段放在 signedAttrs 中，必须受签名保护。
         // 普通 CMS 可以采用不带 signedAttrs 的形式，但缺少这些属性的消息不能作为本项目的 SCEP 消息处理。
@@ -486,16 +536,17 @@ public final class ScepCodec {
     /**
      * 将响应与原请求绑定：复用 transactionID，把请求 senderNonce 放入 recipientNonce。
      *
-     * @param request 已验签的原始请求
-     * @param status  SUCCESS 或 FAILURE，线上值由独立的状态枚举指定
+     * @param transactionId 原始请求的事务标识
+     * @param nonce         原始请求的 senderNonce
+     * @param status        SUCCESS 或 FAILURE，线上值由独立的状态枚举指定
      * @return CertRep 公共属性；响应另生成自己的 senderNonce
      */
-    private static ASN1EncodableVector responseAttributes(Message request, PkiStatusEnum status) {
+    private static ASN1EncodableVector responseAttributes(String transactionId, byte[] nonce, PkiStatusEnum status) {
         // 3 在 messageType 中表示 CertRep，与 pkiStatus 中 3=PENDING 不是同一含义。
-        ASN1EncodableVector attributes = attributes(request.transactionId, MessageTypeEnum.CERT_REP.getCode());
+        ASN1EncodableVector attributes = attributes(transactionId, MessageTypeEnum.CERT_REP.getCode());
         add(attributes, ScepConstants.PKI_STATUS, new DERPrintableString(status.getCode()));
         // 将“对方发送的随机数”放到 recipientNonce；本响应自己的 senderNonce 则重新随机生成。
-        add(attributes, ScepConstants.RECIPIENT_NONCE, new DEROctetString(request.nonce));
+        add(attributes, ScepConstants.RECIPIENT_NONCE, new DEROctetString(nonce));
         add(attributes, ScepConstants.SENDER_NONCE, new DEROctetString(Crypto.randomBytes(ScepConstants.NONCE_BYTES)));
         return attributes;
     }
@@ -542,7 +593,26 @@ public final class ScepCodec {
      */
     private static String string(AttributeTable attributes, ASN1ObjectIdentifier oid) {
         // getInstance 按 ASN.1 类型解析，不能用 toString() 代替，否则错误类型也可能被当成合法文本。
-        return ASN1PrintableString.getInstance(value(attributes, oid)).getString();
+        String text = ASN1PrintableString.getInstance(value(attributes, oid)).getString();
+        if (!ASN1PrintableString.isPrintableString(text)) {
+            throw new IllegalArgumentException("属性包含非法 PrintableString 字符：" + oid);
+        }
+        return text;
+    }
+
+    /**
+     * 读取可安全回显的事务标识，事务标识本身不提供签发授权。
+     *
+     * @param attributes CMS 的 signedAttrs 字段
+     * @return 非空且不超过本实现长度上限的 transactionID
+     * @throws IllegalArgumentException 属性缺失、重复或格式不符时抛出
+     */
+    private static String transactionId(AttributeTable attributes) {
+        String id = string(attributes, ScepConstants.TRANSACTION_ID);
+        if (id.isBlank() || id.length() > ScepConstants.MAX_TRANSACTION_ID_LENGTH) {
+            throw new IllegalArgumentException("事务标识 transactionID 为空或过长");
+        }
+        return id;
     }
 
     /**
@@ -685,6 +755,35 @@ public final class ScepCodec {
         @Override
         public int hashCode() {
             return Objects.hash(transactionId, type, nonce, signer, content);
+        }
+    }
+
+    /**
+     * 生成拒绝响应所需的最小请求上下文；其中字段可能来自尚未验签的 CMS 属性。
+     */
+    @Value
+    @Accessors(fluent = true)
+    public static class ResponseContext {
+        String transactionId;
+
+        byte[] nonce;
+
+        /**
+         * 保存 nonce 快照，避免响应属性依赖的字节被外部修改。
+         *
+         * @param transactionId 请求事务标识
+         * @param nonce          请求 senderNonce
+         */
+        private ResponseContext(String transactionId, byte[] nonce) {
+            this.transactionId = transactionId;
+            this.nonce = nonce.clone();
+        }
+
+        /**
+         * @return senderNonce 的副本
+         */
+        public byte[] nonce() {
+            return nonce.clone();
         }
     }
 

@@ -12,7 +12,7 @@
 - Spring HTTP 端复用 `HttpStatus`、`HttpMethod`、`MediaType`，JDK HTTP 客户端复用 `HttpURLConnection.HTTP_OK`，不把传输层状态与 SCEP 状态混在一起。
 - 空集合的 0、单个值的 1、数组起始下标，以及已经写明名称的注解默认值不机械地包装成常量。独立协议测试保留固定 OID、消息码和畸形报文值，以免生产代码和测试共用错误的映射。
 
-未知消息类型映射到 `UNKNOWN` 后，由服务层返回签名的 badRequest；不支持的 CMS 算法返回 badAlg；找不到续期证书返回 badCertId；CMS 外层签名完整性失败标记为 badMessageCheck，但在没有可信事务上下文时由 HTTP 层拒绝。未知 HTTP 操作返回 400。能力解析保留未知名称并按大小写不敏感匹配已知能力；未知失败原因保留原始码，不能按成功继续处理。`UNKNOWN` 不能作为请求或失败响应的发送参数。
+未知消息类型映射到 `UNKNOWN` 后，由服务层返回签名的 badRequest；不支持的 CMS 算法使用 badAlg；找不到续期证书使用 badCertId；CMS 外层签名或正文摘要校验失败使用 badMessageCheck。外层 CMS 失败时，只有能取得合法的事务关联字段才返回签名 FAILURE，否则由 HTTP 层拒绝。未知 HTTP 操作返回 400。能力解析保留未知名称并按大小写不敏感匹配已知能力；未知失败原因保留原始码，不能按成功继续处理。`UNKNOWN` 不能作为请求或失败响应的发送参数。
 
 ## 包和依赖
 

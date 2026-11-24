@@ -40,9 +40,9 @@ GET/POST 的报文最终都进入私有方法 `processPkiMessage`：复核实际
 
 `params` 注解负责选中入口，但不保证参数只出现一次，因此每个入口都检查 `operation` 唯一性。`unsupportedOperation` 只承接未匹配的 GET/POST，返回缺失操作、未知操作或错误 HTTP 方法的中文错误，不参与签发。路由注解要求编译期常量，所以操作字符串与 `OperationEnum` 共用 `ScepConstants` 的定义。
 
-排查失败时先区分三种情况：报文格式或外层签名错误是 HTTP 400；签发授权被拒绝是 HTTP 200 加可验签的 `CertRep FAILURE`；内部处理故障是 HTTP 500。POST 保留 `application/octet-stream` 及缺省 Content-Type 的旧客户端兼容，有界读取也适用于 chunked 请求。
+无法解析报文或无法取得必要响应字段时返回 HTTP 400。CMS 签名或正文摘要校验失败、外层算法不支持时，如果仍能关联事务，就和签发授权被拒绝一样返回 HTTP 200 和可验签的 `CertRep FAILURE`。内部处理故障返回 HTTP 500。POST 保留 `application/octet-stream` 及缺省 Content-Type 的旧客户端兼容，有界读取也适用于 chunked 请求。
 
-调试 HTTP 路由可运行 `ScepHttpTest`，其中 `preservesOperationErrors` 检查缺失、重复、未知参数，`checksGetSizeBeforeAndAfterBase64Decoding` 展示编码长度与真实字节长度的区别，`keepsSignedFailureAsSuccessfulHttpResponse` 验证 GET/POST 授权拒绝仍返回签名的协议响应。
+调试 HTTP 路由可运行 `ScepHttpTest`，其中 `preservesOperationErrors` 检查缺失、重复、未知参数，`checksGetSizeBeforeAndAfterBase64Decoding` 展示编码长度与真实字节长度的区别。`keepsSignedFailureAsSuccessfulHttpResponse` 和 `returnsSignedBadMessageCheckForInvalidSignature` 分别验证授权拒绝和 CMS 签名失败的 GET/POST 协议响应。
 
 ## 一次初始注册的调用链
 
@@ -142,7 +142,7 @@ HTTP 层兼容使用 `application/octet-stream` 或省略 Content-Type 的客户
 
 `ScepApplication` 选择 HTTP 或管理模式；HTTP 模式由 `ScepServerConfiguration` 从配置的 classpath 资源流读取 CA 并装配签发服务。`ca-init`、`shell` 管理模式不加载已有 CA，因此能够从空目录开始初始化。common 的协议与密码工具不依赖 Spring，调试协议时可直接调用 `ScepCodec`；只有共享 Shell 配置需要框架，相关依赖标记为 optional。
 
-错误也有三个层次：HTTP 格式错误由 Controller/全局处理器返回中文文本；外层 CMS 无法取得可信上下文时不能安全签署协议回复，由服务端返回 HTTP 错误；已经验签的合法 SCEP 请求若算法不支持、续期证书不存在或业务策略拒绝，则返回带对应 `failInfo` 的签名 FAILURE；客户端验签并绑定事务后抛出 `ScepFailureException`。不要把 HTTP 200 当成签发成功。
+CMS 验签失败时，服务端只将结构合法的 `transactionID` 与 `senderNonce` 用于关联失败响应，请求随即结束。只有验签通过的请求才会进入 CSR 解密、授权和签发流程。客户端先用受信 CA 验证响应签名，再核对事务与 nonce，随后按 `failInfo` 抛出 `ScepFailureException`。
 
 响应自带的 `certificates` 集合不是信任根。客户端用预配 CA 匹配 SignerIdentifier，然后验证签名，因此响应可省略 CA；服务端没有预配每台设备的初始身份，请求仍需携带签名证书。可分别调试 `acceptsResponseWithoutEmbeddedCa`、`acceptsSignedFailureWithoutEmbeddedCa` 和 `rejectsRequestWithoutIdentity`。
 

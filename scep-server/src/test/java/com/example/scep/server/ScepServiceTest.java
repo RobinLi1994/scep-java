@@ -8,7 +8,10 @@ import java.security.cert.X509Certificate;
 import java.util.List;
 import java.util.stream.Stream;
 
+import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.DERUTF8String;
+import org.bouncycastle.asn1.cms.AttributeTable;
+import org.bouncycastle.asn1.cms.CMSAttributes;
 import org.bouncycastle.asn1.oiw.OIWObjectIdentifiers;
 import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -19,6 +22,7 @@ import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.asn1.x509.GeneralNames;
 import org.bouncycastle.cms.CMSAlgorithm;
 import org.bouncycastle.cms.CMSSignedData;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import org.junit.jupiter.api.Assumptions;
@@ -29,8 +33,6 @@ import org.junit.jupiter.api.io.TempDir;
 import com.example.scep.common.crypto.Crypto;
 import com.example.scep.common.protocol.ScepCodec;
 import com.example.scep.common.protocol.ScepFailureException;
-import com.example.scep.common.protocol.ScepProtocolException;
-import com.example.scep.common.protocol.enums.FailInfoEnum;
 import com.example.scep.common.protocol.enums.MessageTypeEnum;
 import com.example.scep.server.ca.CertificateAuthority;
 import com.example.scep.server.service.ScepService;
@@ -148,15 +150,57 @@ class ScepServiceTest {
     }
 
     /**
-     * 篡改外层 CMS 签名后必须拒绝，不能继续依赖消息中的事务属性或 CSR。
+     * CMS 签名无效时只回复签名拒绝结果，并验证服务端没有签发证书。
      * @throws Exception 测试所需密码或 I/O 操作异常时由 JUnit 报告
      */
     @Test
-    void rejectsTamperedSignature() throws Exception {
-        byte[] raw = request("test-secret").encoded().clone();
-        raw[raw.length - 1] ^= 1;
-        ScepProtocolException failure = assertThrows(ScepProtocolException.class, () -> service.handle(raw));
-        assertEquals(FailInfoEnum.BAD_MESSAGE_CHECK, failure.failInfo());
+    void returnsSignedFailureWithoutIssuingForInvalidSignature() throws Exception {
+        ScepCodec.Request request = request("test-secret");
+        byte[] encoded = request.encoded();
+        encoded[encoded.length - 1] ^= 1;
+        assertSignedFailure(encoded, request, "1");
+        try (Stream<Path> files = Files.list(depot.resolve("issued"))) {
+            assertEquals(0, files.count());
+        }
+    }
+
+    /** 正文摘要与 CMS 签名属性不匹配时，仍回复可验签的 badMessageCheck。 */
+    @Test
+    void returnsSignedFailureForDigestMismatch() throws Exception {
+        ScepCodec.Request request = request("test-secret");
+        CMSSignedData cms = new CMSSignedData(request.encoded());
+        AttributeTable attributes = cms.getSignerInfos().getSigners().iterator().next().getSignedAttributes()
+                .remove(CMSAttributes.messageDigest).add(CMSAttributes.messageDigest, new DEROctetString(new byte[32]));
+        byte[] encoded = ProtocolFixtures.sign((byte[])cms.getSignedContent().getContent(), key.getPrivate(), self,
+                attributes, true);
+        assertSignedFailure(encoded, request, "1");
+    }
+
+    /** 不在服务端允许列表中的 SHA-384 请求应收到可验签的 badAlg。 */
+    @Test
+    void returnsSignedFailureForUnsupportedOuterDigest() throws Exception {
+        ScepCodec.Request request = request("test-secret");
+        CMSSignedData cms = new CMSSignedData(request.encoded());
+        AttributeTable attributes = cms.getSignerInfos().getSigners().iterator().next().getSignedAttributes()
+                .remove(CMSAttributes.messageDigest);
+        byte[] encoded = ProtocolFixtures.sign((byte[])cms.getSignedContent().getContent(),
+                new JcaContentSignerBuilder("SHA384withRSA").setProvider(Crypto.PROVIDER).build(key.getPrivate()),
+                self, attributes, true);
+        assertSignedFailure(encoded, request, "0");
+    }
+
+    /**
+     * 验证服务端签署的拒绝响应仍通过客户端的 CA 验签、事务及 nonce 校验。
+     * @param encoded 发送给服务端的请求
+     * @param request 客户端原始事务上下文
+     * @param code 预期的协议失败码
+     * @throws Exception 请求处理失败时抛出
+     */
+    private void assertSignedFailure(byte[] encoded, ScepCodec.Request request, String code) throws Exception {
+        byte[] response = service.handle(encoded);
+        ScepFailureException failure = assertThrows(ScepFailureException.class,
+                () -> ScepCodec.readResponse(response, request, ca.certificate(), key.getPrivate(), key.getPublic()));
+        assertEquals(code, failure.failInfo());
     }
 
     /**

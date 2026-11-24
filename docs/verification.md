@@ -19,7 +19,7 @@ Java 17、Spring Boot 4.0.10、Spring Shell 4.0.4、Bouncy Castle 1.87、Lombok 
 | ClientShellTest | 11 | 注册/续期选项分离、旧别名移除、引号与空格、未知/重复/缺失参数及多余位置参数、失败退出码 |
 | ClientConfigurationTest | 8 | 实际 YAML 绑定、CLI 覆盖、续期配置隔离、缺失旧身份拒绝、缺失口令时不写私钥 |
 | ScepServiceTest | 21 | 真实注册、续期、CSR/CMS 校验、授权、SAN、文件持久化及永久拒绝单 DES |
-| ScepHttpTest | 31 | 真实 HTTP、四种路由、缺失/重复/未知参数、Base64 前后大小边界、签名失败仍为 200、固定/chunked 长度、旧 MIME 和中文错误 |
+| ScepHttpTest | 31 | 真实 HTTP、四种路由、缺失/重复/未知参数、Base64 前后大小边界、授权拒绝返回 HTTP 200 和签名 FAILURE、固定/chunked 长度、旧 MIME 和中文错误 |
 | ProtocolRegressionTest | 18 | 响应省略 CA、双向 nonce、新鲜 senderNonce、请求身份必需、信封/证书包结构；线上枚举编码、未知消息、未知失败原因、FAILURE/PENDING 内容结构与未知状态拒绝 |
 | CaShellTest | 3 | 无已有 CA 的管理启动、Path 转换、带空格参数初始化、共享 runner 拒绝错误选项且不创建文件 |
 | ClientCapabilitiesTest | 9 | GetCACaps 顺序、CRLF/LF、大小写、未知能力、旧 MIME、SCEPStandard、POST/GET、算法及 Renewal 门槛 |
@@ -47,9 +47,11 @@ Java 17、Spring Boot 4.0.10、Spring Shell 4.0.4、Bouncy Castle 1.87、Lombok 
 
 ## 本次失败原因映射回归
 
-`ScepProtocolException` 在 common 模块保留解析阶段的 RFC 原因，服务端只有在外层 CMS 已验签、拥有可信事务上下文时才将其编码成签名的 CertRep FAILURE。单 DES 及不支持的摘要/公钥算法使用 `badAlg=0`；外层 CMS 签名验证失败标记 `badMessageCheck=1`，但不继续伪造回复；CSR 格式、CSR PoP、challenge、SAN 和续期授权等交易策略拒绝使用 `badRequest=2`；本 CA 找不到续期证书使用 `badCertId=4`。这样既符合 RFC 8894 §3.2.1.4，也避免把不可信的请求属性用于构造响应。
+按 [RFC 8894 §3.2.1.4](https://www.rfc-editor.org/rfc/rfc8894.html#section-3.2.1.4)，CMS 签名或正文摘要校验失败使用 `badMessageCheck=1`，单 DES 及不支持的摘要/公钥算法使用 `badAlg=0`。外层校验失败且事务关联字段格式有效时，服务端返回签名的 CertRep FAILURE。缺少这些字段时返回 HTTP 400。CSR 格式、CSR PoP、challenge、SAN 和续期授权等拒绝使用 `badRequest=2`，本 CA 找不到续期证书使用 `badCertId=4`。
 
-`ScepServiceTest` 覆盖单 DES、篡改 CMS 签名和缺失续期记录三个关键码；原有错误口令、损坏 CSR、SAN 和未知消息类型用例继续断言 `badRequest=2`。相关 RFC 原文见 [RFC 8894 §3.2.1.4](https://www.rfc-editor.org/rfc/rfc8894.html#section-3.2.1.4)。
+`ScepServiceTest` 覆盖无效 CMS 签名、正文摘要不匹配、不支持的外层摘要算法及缺失续期记录。`ScepHttpTest` 验证 GET 和 POST 在签名无效时返回可验签、可关联原请求且省略 eContent 的 FAILURE，并覆盖缺少回复字段时的 HTTP 400。
+
+2026-11-24 修复后运行 `mvn -B -ntp formatter:format verify`，客户端 22 项、服务端 94 项全部通过。使用本次 JAR 运行 AES 适配版 Go 客户端互通脚本，Java 和 Go 注册、续期及错误口令拒绝均通过。无效 CMS 签名的行为由 Java HTTP 回归验证。
 
 ## 此前问题的复现与修复
 

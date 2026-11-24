@@ -149,20 +149,27 @@ public final class ScepService {
     /**
      * 完成一次同步注册或续期；请求的 HTTP GET/POST 差异已由 Controller 消除。
      *
-     * <p>无法可信解析的外层消息向上抛出异常；已解析的请求若不满足策略则返回签名失败响应。
+     * <p>无法解析必要响应上下文的外层消息向上抛出异常；结构可解析但验签或算法校验失败时返回签名失败响应。
      * 算法不支持返回 badAlg，找不到续期证书返回 badCertId，CSR 和授权策略拒绝返回 badRequest。
-     * CMS 完整性错误只有在能够取得可信上下文时才可编码为 badMessageCheck；外层验签失败时
-     * 不信任请求中的事务和接收者信息，因此继续向上抛出异常。存储和签发异常保留为服务故障。</p>
+     * 响应上下文只用于关联拒绝结果，不参与解密、授权或签发。存储和签发异常保留为服务故障。</p>
      *
      * @param encoded 外层 SignedData 二进制字节
      * @return 完整 CertRep；返回字节并不意味着签发成功，客户端仍要检查 pkiStatus
-     * @throws IllegalArgumentException 外层消息或签名无效时抛出
+     * @throws IllegalArgumentException 外层消息无法映射为协议响应时抛出
      * @throws Exception                存储、CA 签发或响应编码失败时抛出
      */
     public byte[] handle(byte[] encoded) throws Exception {
         log.info("开始处理 SCEP 请求，报文大小={} 字节", encoded.length);
         // 1. CMS 验签仅证明请求由消息中那张证书的私钥持有者签名；该证书仍可能是自签的。
-        ScepCodec.Message message = ScepCodec.decodeRequest(encoded);
+        ScepCodec.Message message;
+        try {
+            message = ScepCodec.decodeRequest(encoded);
+        } catch (ScepProtocolException e) {
+            // 验签失败仍可从结构完整的属性中取得最小上下文；这些字段只用于签署拒绝响应。
+            ScepCodec.ResponseContext context = ScepCodec.decodeResponseContext(encoded);
+            log.warn("SCEP 外层校验失败，failInfo={}，原因={}", e.failInfo().getCode(), e.getMessage());
+            return ScepCodec.failure(context, e.failInfo(), ca.certificate(), ca.key());
+        }
         log.info("请求验签通过，transactionId={}，messageType={}，签名者={}", message.transactionId(),
                 message.type().getCode(), message.signer().getSubjectX500Principal().getName());
         // 同一个 HTTP PKIOperation 可承载不同消息；本服务只处理初始注册 19 和续期 17。
@@ -309,4 +316,5 @@ public final class ScepService {
     private byte[] failure(ScepCodec.Message message, FailInfoEnum failInfo) throws Exception {
         return ScepCodec.failure(message, failInfo, ca.certificate(), ca.key());
     }
+
 }

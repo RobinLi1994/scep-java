@@ -21,6 +21,7 @@ import org.bouncycastle.cms.SignerInformation;
 import org.bouncycastle.cms.jcajce.JcaSignerInfoGeneratorBuilder;
 import org.bouncycastle.cms.jcajce.JceCMSContentEncryptorBuilder;
 import org.bouncycastle.cms.jcajce.JceKeyTransRecipientInfoGenerator;
+import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.jcajce.JcaDigestCalculatorProviderBuilder;
 
 import com.example.scep.common.crypto.Crypto;
@@ -64,11 +65,26 @@ final class ProtocolFixtures {
      */
     static byte[] sign(byte[] bytes, PrivateKey key, X509Certificate certificate, AttributeTable attributes,
             boolean attached) throws Exception {
+        return sign(bytes, Crypto.signer(key), certificate, attributes, attached);
+    }
+
+    /**
+     * 用指定的 CMS 签名器生成夹具，以便验证服务端的算法允许列表。
+     * @param bytes 待签内容
+     * @param signer 测试指定的签名器
+     * @param certificate 签名证书
+     * @param attributes 测试指定的属性
+     * @param attached 是否携带 eContent
+     * @return CMS SignedData 字节
+     * @throws Exception 测试消息无法签名或编码时抛出
+     */
+    static byte[] sign(byte[] bytes, ContentSigner signer, X509Certificate certificate, AttributeTable attributes,
+            boolean attached) throws Exception {
         CMSSignedDataGenerator generator = new CMSSignedDataGenerator();
         JcaSignerInfoGeneratorBuilder builder = new JcaSignerInfoGeneratorBuilder(
                 new JcaDigestCalculatorProviderBuilder().setProvider(Crypto.PROVIDER).build());
         builder.setSignedAttributeGenerator(new DefaultSignedAttributeTableGenerator(attributes));
-        generator.addSignerInfoGenerator(builder.build(Crypto.signer(key), certificate));
+        generator.addSignerInfoGenerator(builder.build(signer, certificate));
         generator.addCertificate(new JcaX509CertificateHolder(certificate));
         return generator.generate(new CMSProcessableByteArray(bytes), attached).getEncoded();
     }

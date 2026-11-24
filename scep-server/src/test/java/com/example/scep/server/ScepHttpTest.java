@@ -13,7 +13,11 @@ import java.security.KeyPair;
 import java.security.cert.X509Certificate;
 import java.util.Base64;
 
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.cms.AttributeTable;
 import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.cms.CMSSignedData;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -33,6 +37,7 @@ import com.example.scep.server.ca.CertificateAuthority;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -166,6 +171,45 @@ class ScepHttpTest {
         ScepFailureException failure = assertThrows(ScepFailureException.class, () -> ScepCodec
                 .readResponse(response.body(), request, ca.certificate(), key.getPrivate(), key.getPublic()));
         assertEquals("2", failure.failInfo());
+    }
+
+    /** CMS 签名失败但仍能关联事务时，GET 和 POST 均返回 CA 签名的 badMessageCheck。 */
+    @ParameterizedTest
+    @ValueSource(strings = {"GET", "POST"})
+    void returnsSignedBadMessageCheckForInvalidSignature(String method) throws Exception {
+        CertificateAuthority ca = CertificateAuthority.load(DEPOT);
+        KeyPair key = Crypto.rsa(2048);
+        X509Certificate identity = Crypto.selfSigned(key, new X500Name("CN=tampered-device"));
+        ScepCodec.Request request = ScepCodec.request(ScepServiceTest.csr(key, "CN=tampered-device", "http-secret"),
+                key.getPrivate(), identity, ca.certificate(), MessageTypeEnum.PKCS_REQ);
+        byte[] encoded = request.encoded();
+        encoded[encoded.length - 1] ^= 1;
+        String query = "operation=PKIOperation";
+        if ("GET".equals(method)) {
+            query += "&message=" + URLEncoder.encode(Base64.getEncoder().encodeToString(encoded),
+                    StandardCharsets.UTF_8);
+        }
+        HttpResponse<byte[]> response = send(method, query, encoded);
+        assertEquals(200, response.statusCode());
+        assertEquals("application/x-pki-message", response.headers().firstValue("Content-Type").orElseThrow());
+        assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
+        assertNull(new CMSSignedData(response.body()).getSignedContent());
+        ScepFailureException failure = assertThrows(ScepFailureException.class, () -> ScepCodec
+                .readResponse(response.body(), request, ca.certificate(), key.getPrivate(), key.getPublic()));
+        assertEquals("1", failure.failInfo());
+    }
+
+    /** 解析出算法错误但缺少 senderNonce 时，服务端无法构造绑定事务的 CertRep。 */
+    @Test
+    void keepsHttpBadRequestForMissingReplyContext() throws Exception {
+        KeyPair key = Crypto.rsa(2048);
+        X509Certificate identity = Crypto.selfSigned(key, new X500Name("CN=missing-nonce"));
+        AttributeTable attributes = ProtocolFixtures.requestAttributes()
+                .remove(new ASN1ObjectIdentifier("2.16.840.1.113733.1.9.5"));
+        byte[] encoded = ProtocolFixtures.sign(new byte[] {1, 2, 3},
+                new JcaContentSignerBuilder("SHA384withRSA").setProvider(Crypto.PROVIDER).build(key.getPrivate()),
+                identity, attributes, true);
+        assertHttpError(send("POST", "operation=PKIOperation", encoded), 400, "SCEP 报文格式或签名无效");
     }
 
     /** HTTP 层错误使用明确状态及中文 UTF-8 文本，并保持禁止缓存。 */

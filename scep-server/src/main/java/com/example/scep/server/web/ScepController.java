@@ -244,7 +244,7 @@ public class ScepController {
      * 在 GET/POST 共用的边界复核报文，再将协议结果转换为 HTTP 响应。
      *
      * @param body 已从传输层还原的 CMS 字节
-     * @return 签名 CertRep，或无法形成可信协议响应时的 HTTP 错误
+     * @return 签名 CertRep，或无法形成协议响应时的 HTTP 错误
      */
     private ResponseEntity<byte[]> processPkiMessage(byte[] body) {
         log.debug("进入 SCEP 协议处理，报文大小={} 字节", body.length);
@@ -255,12 +255,12 @@ public class ScepController {
             return error(HttpStatus.BAD_REQUEST, "SCEP 报文不能为空");
         }
         try {
-            // 正常传回一个 CertRep 就返回 HTTP 200，包括 pkiStatus=FAILURE 的业务拒绝结果。
+            // 能传回 CertRep 就返回 HTTP 200，包括 pkiStatus=FAILURE 的协议拒绝结果。
             byte[] result = service.handle(body);
             log.info("SCEP 协议处理完成，响应大小={} 字节", result.length);
             return response(HttpStatus.OK, ScepConstants.PKI_MESSAGE_MEDIA_TYPE, result);
         } catch (IllegalArgumentException e) {
-            // 外层格式或签名不可信时，无法构造可信的协议回复上下文，用 HTTP 400 表达请求错误。
+            // 外层报文无法形成协议回复时，用 HTTP 400 表达请求错误。
             log.warn("SCEP 报文格式或签名无效，报文大小={} 字节", body.length, e);
             return error(HttpStatus.BAD_REQUEST, "SCEP 报文格式或签名无效");
         } catch (Exception e) {
